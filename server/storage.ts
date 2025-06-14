@@ -1,27 +1,36 @@
 import { 
   users, categories, products, carts, cartItems, orders, orderItems,
-  type User, type InsertUser, type Category, type InsertCategory,
+  type User, type UpsertUser, type InsertUser, type Category, type InsertCategory,
   type Product, type InsertProduct, type Cart, type InsertCart,
   type CartItem, type InsertCartItem, type Order, type InsertOrder,
   type OrderItem, type InsertOrderItem, type ProductWithCategory,
   type CartItemWithProduct, type CartWithItems, type OrderWithItems
 } from "@shared/schema";
+import { db } from "./db";
+import { eq, and, gte, lte, desc, asc } from "drizzle-orm";
 
 export interface IStorage {
-  // Usuarios
-  getUser(id: number): Promise<User | undefined>;
+  // Usuarios para Replit Auth
+  getUser(id: string): Promise<User | undefined>;
+  upsertUser(user: UpsertUser): Promise<User>;
+  getUserByRole(role: string): Promise<User[]>;
+  
+  // Usuarios legacy (mantener compatibilidad)
   getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
 
   // Categorías
   getCategories(): Promise<Category[]>;
   getCategoryById(id: number): Promise<Category | undefined>;
   createCategory(category: InsertCategory): Promise<Category>;
 
-  // Productos
-  getProducts(filters?: { categoryId?: number; search?: string; minPrice?: number; maxPrice?: number }): Promise<ProductWithCategory[]>;
+  // Productos con gestión de inventario
+  getProducts(filters?: { categoryId?: number; search?: string; minPrice?: number; maxPrice?: number; includeInactive?: boolean }): Promise<ProductWithCategory[]>;
   getProductById(id: number): Promise<Product | undefined>;
   createProduct(product: InsertProduct): Promise<Product>;
+  updateProduct(id: number, updates: Partial<InsertProduct>): Promise<Product>;
+  deleteProduct(id: number): Promise<void>;
+  updateStock(productId: number, quantity: number): Promise<Product>;
+  getLowStockProducts(): Promise<Product[]>;
 
   // Carrito
   getCartBySessionId(sessionId: string): Promise<CartWithItems | undefined>;
@@ -37,182 +46,185 @@ export interface IStorage {
   getOrdersBySessionId(sessionId: string): Promise<Order[]>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<number, User> = new Map();
-  private categories: Map<number, Category> = new Map();
-  private products: Map<number, Product> = new Map();
-  private carts: Map<number, Cart> = new Map();
-  private cartItems: Map<number, CartItem> = new Map();
-  private orders: Map<number, Order> = new Map();
-  private orderItems: Map<number, OrderItem> = new Map();
-  
-  private currentUserId = 1;
-  private currentCategoryId = 1;
-  private currentProductId = 1;
-  private currentCartId = 1;
-  private currentCartItemId = 1;
-  private currentOrderId = 1;
-  private currentOrderItemId = 1;
+export class DatabaseStorage implements IStorage {
 
-  constructor() {
-    this.initializeData();
+  // Usuarios para Replit Auth
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
   }
 
-  private initializeData() {
-    // Crear categorías de ejemplo
-    const electronicsCategory: Category = {
-      id: this.currentCategoryId++,
-      name: "Electrónicos",
-      description: "Dispositivos electrónicos y tecnología",
-      slug: "electronicos",
-      createdAt: new Date()
-    };
+  async upsertUser(userData: UpsertUser): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values(userData)
+      .onConflictDoUpdate({
+        target: users.id,
+        set: {
+          ...userData,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    return user;
+  }
+
+  async getUserByRole(role: string): Promise<User[]> {
+    return await db.select().from(users).where(eq(users.role, role));
+  }
+
+  // Usuarios legacy (compatibilidad)
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    return undefined;
+  }
+
+  // Categorías
+  async getCategories(): Promise<Category[]> {
+    return await db.select().from(categories).orderBy(asc(categories.name));
+  }
+
+  async getCategoryById(id: number): Promise<Category | undefined> {
+    const [category] = await db.select().from(categories).where(eq(categories.id, id));
+    return category || undefined;
+  }
+
+  async createCategory(insertCategory: InsertCategory): Promise<Category> {
+    const [category] = await db
+      .insert(categories)
+      .values(insertCategory)
+      .returning();
+    return category;
+  }
+
+  // Productos con gestión de inventario
+  async getProducts(filters?: { 
+    categoryId?: number; 
+    search?: string; 
+    minPrice?: number; 
+    maxPrice?: number; 
+    includeInactive?: boolean 
+  }): Promise<ProductWithCategory[]> {
     
-    const clothingCategory: Category = {
-      id: this.currentCategoryId++,
-      name: "Ropa",
-      description: "Vestimenta y accesorios",
-      slug: "ropa",
-      createdAt: new Date()
-    };
+    let query = db
+      .select({
+        id: products.id,
+        name: products.name,
+        description: products.description,
+        price: products.price,
+        originalPrice: products.originalPrice,
+        image: products.image,
+        categoryId: products.categoryId,
+        inStock: products.inStock,
+        stockQuantity: products.stockQuantity,
+        lowStockThreshold: products.lowStockThreshold,
+        rating: products.rating,
+        reviewCount: products.reviewCount,
+        isOnSale: products.isOnSale,
+        salePercentage: products.salePercentage,
+        isActive: products.isActive,
+        createdAt: products.createdAt,
+        updatedAt: products.updatedAt,
+        category: {
+          id: categories.id,
+          name: categories.name,
+          description: categories.description,
+          slug: categories.slug,
+          createdAt: categories.createdAt,
+        }
+      })
+      .from(products)
+      .leftJoin(categories, eq(products.categoryId, categories.id));
 
-    const homeCategory: Category = {
-      id: this.currentCategoryId++,
-      name: "Hogar",
-      description: "Artículos para el hogar",
-      slug: "hogar",
-      createdAt: new Date()
-    };
+    const conditions = [];
 
-    const sportsCategory: Category = {
-      id: this.currentCategoryId++,
-      name: "Deportes",
-      description: "Equipos y accesorios deportivos",
-      slug: "deportes",
-      createdAt: new Date()
-    };
+    // Filtrar productos inactivos por defecto
+    if (!filters?.includeInactive) {
+      conditions.push(eq(products.isActive, true));
+    }
 
-    this.categories.set(electronicsCategory.id, electronicsCategory);
-    this.categories.set(clothingCategory.id, clothingCategory);
-    this.categories.set(homeCategory.id, homeCategory);
-    this.categories.set(sportsCategory.id, sportsCategory);
+    if (filters?.categoryId) {
+      conditions.push(eq(products.categoryId, filters.categoryId));
+    }
 
-    // Crear productos de ejemplo
-    const sampleProducts: Omit<Product, 'id' | 'createdAt'>[] = [
-      {
-        name: "Smartphone Samsung Galaxy S24",
-        description: "Smartphone de última generación con cámara profesional y procesador potente",
-        price: "899.00",
-        originalPrice: "1059.00",
-        image: "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.8",
-        reviewCount: 127,
-        isOnSale: true,
-        salePercentage: 15
-      },
-      {
-        name: "MacBook Pro 14\" M3",
-        description: "Laptop profesional con chip M3, ideal para trabajo y creatividad",
-        price: "1999.00",
-        originalPrice: null,
-        image: "https://images.unsplash.com/photo-1496181133206-80ce9b88a853?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.7",
-        reviewCount: 89,
-        isOnSale: false,
-        salePercentage: null
-      },
-      {
-        name: "AirPods Pro (3ra Gen)",
-        description: "Auriculares inalámbricos con cancelación de ruido activa",
-        price: "249.00",
-        originalPrice: "279.00",
-        image: "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.9",
-        reviewCount: 203,
-        isOnSale: true,
-        salePercentage: 11
-      },
-      {
-        name: "Apple Watch Series 9",
-        description: "Reloj inteligente con funciones avanzadas de salud y fitness",
-        price: "399.00",
-        originalPrice: null,
-        image: "https://images.unsplash.com/photo-1523275335684-37898b6baf30?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.6",
-        reviewCount: 156,
-        isOnSale: false,
-        salePercentage: null
-      },
-      {
-        name: "Cámara Canon EOS R6 Mark II",
-        description: "Cámara profesional con sensor full frame y grabación 4K",
-        price: "2499.00",
-        originalPrice: null,
-        image: "https://images.unsplash.com/photo-1606983340126-99ab4feaa64a?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.9",
-        reviewCount: 67,
-        isOnSale: false,
-        salePercentage: null
-      },
-      {
-        name: "iPad Pro 12.9\" M2",
-        description: "Tablet profesional con pantalla Liquid Retina XDR",
-        price: "1099.00",
-        originalPrice: null,
-        image: "https://images.unsplash.com/photo-1544244015-0df4b3ffc6b0?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.7",
-        reviewCount: 94,
-        isOnSale: false,
-        salePercentage: null
-      },
-      {
-        name: "PlayStation 5",
-        description: "Consola de videojuegos de nueva generación",
-        price: "499.00",
-        originalPrice: null,
-        image: "https://images.unsplash.com/photo-1606144042614-b2417e99c4e3?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.8",
-        reviewCount: 312,
-        isOnSale: false,
-        salePercentage: null
-      },
-      {
-        name: "Monitor Gaming 4K 27\"",
-        description: "Monitor para gaming con resolución 4K y alta frecuencia de actualización",
-        price: "399.00",
-        originalPrice: "499.00",
-        image: "https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?ixlib=rb-4.0.3&auto=format&fit=crop&w=400&h=300",
-        categoryId: electronicsCategory.id,
-        inStock: true,
-        rating: "4.5",
-        reviewCount: 78,
-        isOnSale: true,
-        salePercentage: 20
-      }
-    ];
+    if (filters?.search) {
+      const searchTerm = `%${filters.search.toLowerCase()}%`;
+      conditions.push(
+        // Use SQL function for case-insensitive search
+        eq(db.raw`LOWER(${products.name}) LIKE ${searchTerm}`)
+      );
+    }
 
-    sampleProducts.forEach(product => {
-      const newProduct: Product = {
-        ...product,
-        id: this.currentProductId++,
-        createdAt: new Date()
-      };
-      this.products.set(newProduct.id, newProduct);
-    });
+    if (filters?.minPrice !== undefined) {
+      conditions.push(gte(products.price, filters.minPrice.toString()));
+    }
+
+    if (filters?.maxPrice !== undefined) {
+      conditions.push(lte(products.price, filters.maxPrice.toString()));
+    }
+
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions));
+    }
+
+    const results = await query.orderBy(desc(products.createdAt));
+
+    return results.map(row => ({
+      ...row,
+      category: row.category.id ? row.category : undefined
+    }));
+  }
+
+  async getProductById(id: number): Promise<Product | undefined> {
+    const [product] = await db.select().from(products).where(eq(products.id, id));
+    return product || undefined;
+  }
+
+  async createProduct(insertProduct: InsertProduct): Promise<Product> {
+    const [product] = await db
+      .insert(products)
+      .values(insertProduct)
+      .returning();
+    return product;
+  }
+
+  async updateProduct(id: number, updates: Partial<InsertProduct>): Promise<Product> {
+    const [product] = await db
+      .update(products)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(products.id, id))
+      .returning();
+    return product;
+  }
+
+  async deleteProduct(id: number): Promise<void> {
+    await db.update(products)
+      .set({ isActive: false, updatedAt: new Date() })
+      .where(eq(products.id, id));
+  }
+
+  async updateStock(productId: number, quantity: number): Promise<Product> {
+    const [product] = await db
+      .update(products)
+      .set({ 
+        stockQuantity: quantity,
+        inStock: quantity > 0,
+        updatedAt: new Date()
+      })
+      .where(eq(products.id, productId))
+      .returning();
+    return product;
+  }
+
+  async getLowStockProducts(): Promise<Product[]> {
+    return await db
+      .select()
+      .from(products)
+      .where(
+        and(
+          eq(products.isActive, true),
+          lte(products.stockQuantity, products.lowStockThreshold)
+        )
+      );
   }
 
   // Implementación de métodos de usuarios

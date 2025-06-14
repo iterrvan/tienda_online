@@ -1,12 +1,28 @@
-import { pgTable, text, serial, integer, boolean, decimal, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, decimal, timestamp, varchar, jsonb, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-// Tabla de usuarios (mantenemos la existente)
+// Session storage table for Replit Auth
+export const sessions = pgTable(
+  "sessions",
+  {
+    sid: varchar("sid").primaryKey(),
+    sess: jsonb("sess").notNull(),
+    expire: timestamp("expire").notNull(),
+  },
+  (table) => [index("IDX_session_expire").on(table.expire)],
+);
+
+// Tabla de usuarios actualizada para Replit Auth
 export const users = pgTable("users", {
-  id: serial("id").primaryKey(),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
+  id: varchar("id").primaryKey().notNull(),
+  email: varchar("email").unique(),
+  firstName: varchar("first_name"),
+  lastName: varchar("last_name"),
+  profileImageUrl: varchar("profile_image_url"),
+  role: text("role").default("customer"), // customer, admin
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 // Tabla de categorías
@@ -18,7 +34,7 @@ export const categories = pgTable("categories", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// Tabla de productos
+// Tabla de productos con gestión de inventario
 export const products = pgTable("products", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
@@ -28,11 +44,15 @@ export const products = pgTable("products", {
   image: text("image").notNull(),
   categoryId: integer("category_id").references(() => categories.id),
   inStock: boolean("in_stock").default(true),
+  stockQuantity: integer("stock_quantity").default(0), // Cantidad en inventario
+  lowStockThreshold: integer("low_stock_threshold").default(10), // Umbral de stock bajo
   rating: decimal("rating", { precision: 2, scale: 1 }).default("0"),
   reviewCount: integer("review_count").default(0),
   isOnSale: boolean("is_on_sale").default(false),
   salePercentage: integer("sale_percentage"),
+  isActive: boolean("is_active").default(true), // Para activar/desactivar productos
   createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 });
 
 // Tabla de carritos de compras
@@ -82,9 +102,17 @@ export const orderItems = pgTable("order_items", {
 });
 
 // Esquemas de inserción
+export const upsertUserSchema = createInsertSchema(users).omit({
+  createdAt: true,
+  updatedAt: true,
+});
+
 export const insertUserSchema = createInsertSchema(users).pick({
-  username: true,
-  password: true,
+  id: true,
+  email: true,
+  firstName: true,
+  lastName: true,
+  profileImageUrl: true,
 });
 
 export const insertCategorySchema = createInsertSchema(categories).omit({
@@ -95,6 +123,7 @@ export const insertCategorySchema = createInsertSchema(categories).omit({
 export const insertProductSchema = createInsertSchema(products).omit({
   id: true,
   createdAt: true,
+  updatedAt: true,
 });
 
 export const insertCartSchema = createInsertSchema(carts).omit({
@@ -119,6 +148,7 @@ export const insertOrderItemSchema = createInsertSchema(orderItems).omit({
 
 // Tipos TypeScript
 export type User = typeof users.$inferSelect;
+export type UpsertUser = z.infer<typeof upsertUserSchema>;
 export type InsertUser = z.infer<typeof insertUserSchema>;
 
 export type Category = typeof categories.$inferSelect;
