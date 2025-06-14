@@ -160,13 +160,14 @@ export class DatabaseStorage implements IStorage {
       conditions.push(lte(products.price, filters.maxPrice.toString()));
     }
 
+    let finalQuery = baseQuery;
     if (conditions.length > 0) {
-      query = query.where(and(...conditions));
+      finalQuery = baseQuery.where(and(...conditions));
     }
 
-    const results = await query.orderBy(desc(products.createdAt));
+    const results = await finalQuery.orderBy(desc(products.createdAt));
 
-    return results.map(row => ({
+    return results.map((row: any) => ({
       ...row,
       category: row.category?.id ? row.category : undefined
     }));
