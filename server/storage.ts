@@ -7,7 +7,7 @@ import {
   type CartItemWithProduct, type CartWithItems, type OrderWithItems
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, gte, lte, desc, asc } from "drizzle-orm";
+import { eq, and, gte, lte, desc, asc, like, ilike, sql } from "drizzle-orm";
 
 export interface IStorage {
   // Usuarios para Replit Auth
@@ -105,7 +105,7 @@ export class DatabaseStorage implements IStorage {
     includeInactive?: boolean 
   }): Promise<ProductWithCategory[]> {
     
-    let query = db
+    let baseQuery = db
       .select({
         id: products.id,
         name: products.name,
@@ -147,10 +147,8 @@ export class DatabaseStorage implements IStorage {
     }
 
     if (filters?.search) {
-      const searchTerm = `%${filters.search.toLowerCase()}%`;
       conditions.push(
-        // Use SQL function for case-insensitive search
-        eq(db.raw`LOWER(${products.name}) LIKE ${searchTerm}`)
+        ilike(products.name, `%${filters.search}%`)
       );
     }
 
@@ -170,7 +168,7 @@ export class DatabaseStorage implements IStorage {
 
     return results.map(row => ({
       ...row,
-      category: row.category.id ? row.category : undefined
+      category: row.category?.id ? row.category : undefined
     }));
   }
 
@@ -227,197 +225,158 @@ export class DatabaseStorage implements IStorage {
       );
   }
 
-  // Implementación de métodos de usuarios
-  async getUser(id: number): Promise<User | undefined> {
-    return this.users.get(id);
-  }
-
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(user => user.username === username);
-  }
-
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = this.currentUserId++;
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
-    return user;
-  }
-
-  // Implementación de métodos de categorías
-  async getCategories(): Promise<Category[]> {
-    return Array.from(this.categories.values());
-  }
-
-  async getCategoryById(id: number): Promise<Category | undefined> {
-    return this.categories.get(id);
-  }
-
-  async createCategory(insertCategory: InsertCategory): Promise<Category> {
-    const id = this.currentCategoryId++;
-    const category: Category = { 
-      ...insertCategory, 
-      id, 
-      createdAt: new Date() 
-    };
-    this.categories.set(id, category);
-    return category;
-  }
-
-  // Implementación de métodos de productos
-  async getProducts(filters?: { categoryId?: number; search?: string; minPrice?: number; maxPrice?: number }): Promise<ProductWithCategory[]> {
-    let products = Array.from(this.products.values());
-
-    if (filters) {
-      if (filters.categoryId) {
-        products = products.filter(p => p.categoryId === filters.categoryId);
-      }
-      if (filters.search) {
-        const search = filters.search.toLowerCase();
-        products = products.filter(p => 
-          p.name.toLowerCase().includes(search) || 
-          p.description?.toLowerCase().includes(search)
-        );
-      }
-      if (filters.minPrice !== undefined) {
-        products = products.filter(p => parseFloat(p.price) >= filters.minPrice!);
-      }
-      if (filters.maxPrice !== undefined) {
-        products = products.filter(p => parseFloat(p.price) <= filters.maxPrice!);
-      }
-    }
-
-    return products.map(product => ({
-      ...product,
-      category: product.categoryId ? this.categories.get(product.categoryId) : undefined
-    }));
-  }
-
-  async getProductById(id: number): Promise<Product | undefined> {
-    return this.products.get(id);
-  }
-
-  async createProduct(insertProduct: InsertProduct): Promise<Product> {
-    const id = this.currentProductId++;
-    const product: Product = { 
-      ...insertProduct, 
-      id, 
-      createdAt: new Date() 
-    };
-    this.products.set(id, product);
-    return product;
-  }
-
-  // Implementación de métodos de carrito
+  // Carrito
   async getCartBySessionId(sessionId: string): Promise<CartWithItems | undefined> {
-    const cart = Array.from(this.carts.values()).find(c => c.sessionId === sessionId);
+    const [cart] = await db
+      .select()
+      .from(carts)
+      .where(eq(carts.sessionId, sessionId));
+    
     if (!cart) return undefined;
 
-    const items = Array.from(this.cartItems.values())
-      .filter(item => item.cartId === cart.id)
-      .map(item => ({
-        ...item,
-        product: this.products.get(item.productId!)!
-      }))
-      .filter(item => item.product);
+    const items = await db
+      .select({
+        id: cartItems.id,
+        cartId: cartItems.cartId,
+        productId: cartItems.productId,
+        quantity: cartItems.quantity,
+        createdAt: cartItems.createdAt,
+        product: {
+          id: products.id,
+          name: products.name,
+          price: products.price,
+          originalPrice: products.originalPrice,
+          image: products.image,
+          description: products.description,
+          categoryId: products.categoryId,
+          inStock: products.inStock,
+          stockQuantity: products.stockQuantity,
+          lowStockThreshold: products.lowStockThreshold,
+          rating: products.rating,
+          reviewCount: products.reviewCount,
+          isOnSale: products.isOnSale,
+          salePercentage: products.salePercentage,
+          isActive: products.isActive,
+          createdAt: products.createdAt,
+          updatedAt: products.updatedAt,
+        }
+      })
+      .from(cartItems)
+      .leftJoin(products, eq(cartItems.productId, products.id))
+      .where(eq(cartItems.cartId, cart.id));
 
-    return { ...cart, items };
+    return {
+      ...cart,
+      items: items.map(item => ({
+        ...item,
+        product: item.product
+      }))
+    };
   }
 
   async createCart(insertCart: InsertCart): Promise<Cart> {
-    const id = this.currentCartId++;
-    const cart: Cart = { 
-      ...insertCart, 
-      id, 
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-    this.carts.set(id, cart);
+    const [cart] = await db
+      .insert(carts)
+      .values(insertCart)
+      .returning();
     return cart;
   }
 
   async addToCart(cartId: number, productId: number, quantity: number): Promise<CartItem> {
     // Verificar si ya existe el item en el carrito
-    const existingItem = Array.from(this.cartItems.values())
-      .find(item => item.cartId === cartId && item.productId === productId);
+    const [existingItem] = await db
+      .select()
+      .from(cartItems)
+      .where(and(eq(cartItems.cartId, cartId), eq(cartItems.productId, productId)));
 
     if (existingItem) {
-      // Actualizar cantidad
-      existingItem.quantity += quantity;
-      this.cartItems.set(existingItem.id, existingItem);
-      return existingItem;
-    } else {
-      // Crear nuevo item
-      const id = this.currentCartItemId++;
-      const cartItem: CartItem = {
-        id,
+      // Actualizar cantidad si ya existe
+      const [updatedItem] = await db
+        .update(cartItems)
+        .set({ quantity: existingItem.quantity + quantity })
+        .where(eq(cartItems.id, existingItem.id))
+        .returning();
+      return updatedItem;
+    }
+
+    // Crear nuevo item
+    const [cartItem] = await db
+      .insert(cartItems)
+      .values({
         cartId,
         productId,
-        quantity,
-        createdAt: new Date()
-      };
-      this.cartItems.set(id, cartItem);
-      return cartItem;
-    }
+        quantity
+      })
+      .returning();
+    return cartItem;
   }
 
   async updateCartItem(cartItemId: number, quantity: number): Promise<CartItem> {
-    const item = this.cartItems.get(cartItemId);
-    if (!item) throw new Error("Item del carrito no encontrado");
-    
-    item.quantity = quantity;
-    this.cartItems.set(cartItemId, item);
-    return item;
+    const [cartItem] = await db
+      .update(cartItems)
+      .set({ quantity })
+      .where(eq(cartItems.id, cartItemId))
+      .returning();
+    return cartItem;
   }
 
   async removeFromCart(cartItemId: number): Promise<void> {
-    this.cartItems.delete(cartItemId);
+    await db.delete(cartItems).where(eq(cartItems.id, cartItemId));
   }
 
   async clearCart(cartId: number): Promise<void> {
-    const itemsToDelete = Array.from(this.cartItems.entries())
-      .filter(([_, item]) => item.cartId === cartId)
-      .map(([id, _]) => id);
-    
-    itemsToDelete.forEach(id => this.cartItems.delete(id));
+    await db.delete(cartItems).where(eq(cartItems.cartId, cartId));
   }
 
-  // Implementación de métodos de órdenes
+  // Órdenes
   async createOrder(insertOrder: InsertOrder, items: InsertOrderItem[]): Promise<OrderWithItems> {
-    const orderId = this.currentOrderId++;
-    const order: Order = { 
-      ...insertOrder, 
-      id: orderId, 
-      createdAt: new Date() 
-    };
-    this.orders.set(orderId, order);
+    const [order] = await db
+      .insert(orders)
+      .values(insertOrder)
+      .returning();
 
-    const orderItemsData: OrderItem[] = items.map(item => ({
+    const orderItemsData = items.map(item => ({
       ...item,
-      id: this.currentOrderItemId++,
-      orderId
+      orderId: order.id
     }));
 
-    orderItemsData.forEach(item => {
-      this.orderItems.set(item.id, item);
-    });
+    const insertedItems = await db
+      .insert(orderItems)
+      .values(orderItemsData)
+      .returning();
 
-    return { ...order, items: orderItemsData };
+    return {
+      ...order,
+      items: insertedItems
+    };
   }
 
   async getOrderById(id: number): Promise<OrderWithItems | undefined> {
-    const order = this.orders.get(id);
+    const [order] = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, id));
+    
     if (!order) return undefined;
 
-    const items = Array.from(this.orderItems.values())
-      .filter(item => item.orderId === id);
+    const items = await db
+      .select()
+      .from(orderItems)
+      .where(eq(orderItems.orderId, id));
 
-    return { ...order, items };
+    return {
+      ...order,
+      items
+    };
   }
 
   async getOrdersBySessionId(sessionId: string): Promise<Order[]> {
-    return Array.from(this.orders.values())
-      .filter(order => order.sessionId === sessionId);
+    return await db
+      .select()
+      .from(orders)
+      .where(eq(orders.sessionId, sessionId))
+      .orderBy(desc(orders.createdAt));
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();
